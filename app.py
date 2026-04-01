@@ -8,18 +8,18 @@ import pandas as pd
 from lxml import etree
 
 # =============================================================================
-# SELLER DETAILS — fill in your company's permanent data here
+# SELLER DETAILS
 # =============================================================================
 SELLER = {
-    "pib":          "SELLER_PIB",           # 9-digit PIB
-    "name":         "Naziv prodavca d.o.o.",
-    "street":       "Ulica i broj",
-    "city":         "Grad",
-    "post_code":    "00000",
+    "pib":          "110014338",
+    "name":         "SERVIER doo",
+    "street":       "Milutina Milankovića 11a",
+    "city":         "Novi Beograd",
+    "post_code":    "11070",
     "country":      "RS",
-    "mb":           "SELLER_MB",            # 8-digit matični broj
-    "email":        "fakture@seller.rs",
-    "bank_account": "XXX-XXXXXXXXXXXXXXXX-XX",
+    "mb":           "21285293",
+    "email":        "fakture@servier.rs",
+    "bank_account": "325-950050031087-338",
 }
 
 # =============================================================================
@@ -51,8 +51,13 @@ def _fmt_date(val) -> str:
 
 
 def _str(val) -> str:
-    if pd.isna(val) or val is None:
+    if val is None:
         return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
     return str(val).strip()
 
 
@@ -61,6 +66,27 @@ def _dec(val, decimals: int = 2) -> str:
         return f"{float(val):.{decimals}f}"
     except (TypeError, ValueError):
         return "0.00"
+
+
+def _strip_rs_prefix(val: str) -> str:
+    """Remove 'RS' prefix from PIB/VAT numbers if present, return digits only."""
+    s = val.strip()
+    if s.upper().startswith("RS"):
+        s = s[2:].strip()
+    return s
+
+
+def _safe_float(val) -> float:
+    """Convert to float safely, stripping RS prefix and non-numeric chars."""
+    try:
+        s = _str(val)
+        if not s:
+            return 0.0
+        # Strip RS prefix if present (e.g. "RS100270693" → "100270693")
+        s = _strip_rs_prefix(s)
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _add(parent, tag: str, text: str, **attribs):
@@ -82,8 +108,13 @@ def _read_kv(df: pd.DataFrame) -> dict:
     for _, row in df.iterrows():
         k = _str(row.iloc[0])
         v = row.iloc[1] if len(row) > 1 else None
-        if k and not pd.isna(v) and v is not None:
-            kv[k] = v
+        if k:
+            try:
+                is_na = pd.isna(v)
+            except (TypeError, ValueError):
+                is_na = False
+            if not is_na and v is not None:
+                kv[k] = v
     return kv
 
 
@@ -101,14 +132,16 @@ def _read_lines(df: pd.DataFrame) -> list:
 def build_xml(xlsx_path: str) -> bytes:
     xl = pd.ExcelFile(xlsx_path)
 
-    gen_df  = pd.read_excel(xl, sheet_name="General",                        header=None)
-    inv_df  = pd.read_excel(xl, sheet_name="Edit - Posted Sales Invoice - ",  header=None)
-    tot_df  = pd.read_excel(xl, sheet_name="Edit - Posted Sales Invoice - 1", header=None)
-    inv2_df = pd.read_excel(xl, sheet_name="Invoicing",                       header=None)
+    gen_df   = pd.read_excel(xl, sheet_name="General",                        header=None)
+    inv_df   = pd.read_excel(xl, sheet_name="Edit - Posted Sales Invoice - ",  header=None)
+    tot_df   = pd.read_excel(xl, sheet_name="Edit - Posted Sales Invoice - 1", header=None)
+    inv2_df  = pd.read_excel(xl, sheet_name="Invoicing",                       header=None)
+    reg_df   = pd.read_excel(xl, sheet_name="Registration Numbers",            header=None)
 
     gen   = _read_kv(gen_df)
     tot   = _read_kv(tot_df)
     inv2  = _read_kv(inv2_df)
+    reg   = _read_kv(reg_df)
     lines = _read_lines(inv_df)
 
     invoice_no   = _str(gen.get("No.", ""))
@@ -118,24 +151,30 @@ def build_xml(xlsx_path: str) -> bytes:
     ext_doc_no   = _str(gen.get("External Document No.", ""))
 
     buyer_name   = _str(gen.get("Sell-to Customer Name",  inv2.get("Bill-to Name", "")))
-    buyer_pib    = _str(gen.get("Sell-to Customer No.",   inv2.get("Bill-to Customer No.", "")))
     buyer_street = _str(gen.get("Sell-to Address",        inv2.get("Bill-to Address", "")))
     buyer_city   = _str(gen.get("Sell-to City",           inv2.get("Bill-to City", "")))
     buyer_zip    = _str(gen.get("Sell-to Post Code",      inv2.get("Bill-to Post Code", "")))
 
-    discount_total = float(tot.get("Invoice Discount Amount Excl. VAT", 0) or 0)
-    total_excl_vat = float(tot.get("Total Excl. VAT (RSD)", 0) or 0)
-    total_vat      = float(tot.get("Total VAT (RSD)", 0) or 0)
-    total_incl_vat = float(tot.get("Total Incl. VAT (RSD)", 0) or 0)
+    # ── Buyer PIB: read from Registration Numbers sheet ──────────────────────
+    # "VAT Registration No." may be stored as "100270693" or "RS100270693"
+    raw_buyer_pib = _str(reg.get("VAT Registration No.", gen.get("Sell-to Customer No.", inv2.get("Bill-to Customer No.", ""))))
+    buyer_pib = _strip_rs_prefix(raw_buyer_pib)   # pure digits, no RS prefix
+
+    discount_total = _safe_float(tot.get("Invoice Discount Amount Excl. VAT", 0))
+    total_excl_vat = _safe_float(tot.get("Total Excl. VAT (RSD)", 0))
+    total_vat      = _safe_float(tot.get("Total VAT (RSD)", 0))
+    total_incl_vat = _safe_float(tot.get("Total Incl. VAT (RSD)", 0))
 
     vat_groups = {}
     line_ext_total = 0.0
     for ln in lines:
-        line_amt = float(ln.get("Line Amount Excl. VAT", 0) or 0)
+        line_amt = _safe_float(ln.get("Line Amount Excl. VAT", 0))
         line_ext_total += line_amt
         price_incl = None
         try:
-            price_incl = float(ln.get("", None))
+            raw = ln.get("", None)
+            if raw is not None:
+                price_incl = _safe_float(raw) or None
         except (TypeError, ValueError):
             pass
         if price_incl and line_amt:
@@ -165,7 +204,7 @@ def build_xml(xlsx_path: str) -> bytes:
     ip = _sub(root, "cac:InvoicePeriod")
     _add(ip, "cbc:DescriptionCode", "35")
 
-    # Supplier
+    # ── Supplier ──────────────────────────────────────────────────────────────
     sup_party = _sub(_sub(root, "cac:AccountingSupplierParty"), "cac:Party")
     _add(sup_party, "cbc:EndpointID", SELLER["pib"]).set("schemeID", "9948")
     _add(_sub(sup_party, "cac:PartyName"), "cbc:Name", SELLER["name"])
@@ -175,14 +214,14 @@ def build_xml(xlsx_path: str) -> bytes:
     _add(pa, "cbc:PostalZone", SELLER["post_code"])
     _add(_sub(pa, "cac:Country"), "cbc:IdentificationCode", SELLER["country"])
     pts = _sub(sup_party, "cac:PartyTaxScheme")
-    _add(pts, "cbc:CompanyID", f"RS{SELLER['pib']}")
+    _add(pts, "cbc:CompanyID", f"RS{SELLER['pib']}")   # always RS + 9 digits
     _add(_sub(pts, "cac:TaxScheme"), "cbc:ID", "VAT")
     ple = _sub(sup_party, "cac:PartyLegalEntity")
     _add(ple, "cbc:RegistrationName", SELLER["name"])
     _add(ple, "cbc:CompanyID", SELLER["mb"])
     _add(_sub(sup_party, "cac:Contact"), "cbc:ElectronicMail", SELLER["email"])
 
-    # Customer
+    # ── Customer ──────────────────────────────────────────────────────────────
     cust_party = _sub(_sub(root, "cac:AccountingCustomerParty"), "cac:Party")
     _add(cust_party, "cbc:EndpointID", buyer_pib).set("schemeID", "9948")
     _add(_sub(cust_party, "cac:PartyName"), "cbc:Name", buyer_name)
@@ -193,17 +232,17 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(cpa, "cbc:PostalZone", buyer_zip)
     _add(_sub(cpa, "cac:Country"), "cbc:IdentificationCode", "RS")
     cpts = _sub(cust_party, "cac:PartyTaxScheme")
-    _add(cpts, "cbc:CompanyID", f"RS{buyer_pib}")
+    _add(cpts, "cbc:CompanyID", f"RS{buyer_pib}")       # always RS + 9 digits
     _add(_sub(cpts, "cac:TaxScheme"), "cbc:ID", "VAT")
     _add(_sub(cust_party, "cac:PartyLegalEntity"), "cbc:RegistrationName", buyer_name)
 
-    # Delivery & payment
+    # ── Delivery & payment ────────────────────────────────────────────────────
     _add(_sub(root, "cac:Delivery"), "cbc:ActualDeliveryDate", vat_date)
     pm = _sub(root, "cac:PaymentMeans")
     _add(pm, "cbc:PaymentMeansCode", "30")
     _add(_sub(pm, "cac:PayeeFinancialAccount"), "cbc:ID", SELLER["bank_account"])
 
-    # Document discount
+    # ── Document-level discount ───────────────────────────────────────────────
     if discount_total:
         ac = _sub(root, "cac:AllowanceCharge")
         _add(ac, "cbc:ChargeIndicator", "false")
@@ -212,7 +251,7 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(tc, "cbc:ID", "S"); _add(tc, "cbc:Percent", "10")
         _add(_sub(tc, "cac:TaxScheme"), "cbc:ID", "VAT")
 
-    # TaxTotal
+    # ── TaxTotal ──────────────────────────────────────────────────────────────
     tt = _sub(root, "cac:TaxTotal")
     _add(tt, "cbc:TaxAmount", _dec(total_vat)).set("currencyID", "RSD")
     for rate, grp in sorted(vat_groups.items()):
@@ -223,7 +262,7 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(tc2, "cbc:ID", "S"); _add(tc2, "cbc:Percent", str(int(rate)))
         _add(_sub(tc2, "cac:TaxScheme"), "cbc:ID", "VAT")
 
-    # LegalMonetaryTotal
+    # ── LegalMonetaryTotal ────────────────────────────────────────────────────
     lmt = _sub(root, "cac:LegalMonetaryTotal")
     _add(lmt, "cbc:LineExtensionAmount", _dec(line_ext_total)).set("currencyID", "RSD")
     _add(lmt, "cbc:TaxExclusiveAmount",  _dec(total_excl_vat)).set("currencyID", "RSD")
@@ -234,15 +273,15 @@ def build_xml(xlsx_path: str) -> bytes:
     _add(lmt, "cbc:PayableRoundingAmount","0.00").set("currencyID", "RSD")
     _add(lmt, "cbc:PayableAmount",        _dec(total_incl_vat)).set("currencyID", "RSD")
 
-    # Invoice lines
+    # ── Invoice lines ─────────────────────────────────────────────────────────
     for idx, ln in enumerate(lines, start=1):
-        qty       = _str(ln.get("Quantity", "1"))
-        uom       = _str(ln.get("Unit of Measure Code", "XBX"))
-        desc      = _str(ln.get("Description", ""))
-        item_no   = _str(ln.get("No.", ""))
-        unit_price= float(ln.get("Unit Price Excl. VAT", 0) or 0)
-        line_amt  = float(ln.get("Line Amount Excl. VAT", 0) or 0)
-        disc_pct  = float(ln.get("Line Discount %", 0) or 0)
+        qty        = _str(ln.get("Quantity", "1"))
+        uom        = _str(ln.get("Unit of Measure Code", "XBX"))
+        desc       = _str(ln.get("Description", ""))
+        item_no    = _str(ln.get("No.", ""))
+        unit_price = _safe_float(ln.get("Unit Price Excl. VAT", 0))
+        line_amt   = _safe_float(ln.get("Line Amount Excl. VAT", 0))
+        disc_pct   = _safe_float(ln.get("Line Discount %", 0))
 
         il = _sub(root, "cac:InvoiceLine")
         _add(il, "cbc:ID", str(idx))
@@ -250,7 +289,7 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(il, "cbc:LineExtensionAmount", _dec(line_amt)).set("currencyID", "RSD")
 
         if disc_pct:
-            disc_base = unit_price * float(qty)
+            disc_base = unit_price * _safe_float(qty)
             lac = _sub(il, "cac:AllowanceCharge")
             _add(lac, "cbc:ChargeIndicator", "false")
             _add(lac, "cbc:AllowanceChargeReason", "Popust")
@@ -264,7 +303,9 @@ def build_xml(xlsx_path: str) -> bytes:
 
         price_incl = None
         try:
-            price_incl = float(ln.get("", None))
+            raw = ln.get("", None)
+            if raw is not None:
+                price_incl = _safe_float(raw) or None
         except (TypeError, ValueError):
             pass
         vat_rate = round(((price_incl / line_amt) - 1) * 100 / 5) * 5 if (price_incl and line_amt) else 10
@@ -392,7 +433,7 @@ if uploaded:
 
 st.markdown("""
 <div class="info-row">
-    <span>Reads: General · Invoice Lines · Totals · Invoicing</span>
+    <span>Reads: General · Invoice Lines · Totals · Invoicing · Registration Numbers</span>
     <span>Schema: EN 16931 / mfin.gov.rs 2022</span>
 </div>
 """, unsafe_allow_html=True)
