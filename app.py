@@ -76,6 +76,20 @@ def _strip_rs_prefix(val: str) -> str:
     return s
 
 
+def _pib(val) -> str:
+    """Return a clean PIB/VAT string — no RS prefix, no .0 float suffix."""
+    s = _str(val)
+    if not s:
+        return ""
+    s = _strip_rs_prefix(s)
+    # Excel often reads integer IDs as floats: "100000266.0" → "100000266"
+    try:
+        s = str(int(float(s)))
+    except (ValueError, TypeError):
+        pass
+    return s
+
+
 def _safe_float(val) -> float:
     """Convert to float safely, stripping RS prefix and non-numeric chars."""
     try:
@@ -157,8 +171,8 @@ def build_xml(xlsx_path: str) -> bytes:
 
     # ── Buyer PIB: read from Registration Numbers sheet ──────────────────────
     # "VAT Registration No." may be stored as "100270693" or "RS100270693"
-    raw_buyer_pib = _str(reg.get("VAT Registration No.", gen.get("Sell-to Customer No.", inv2.get("Bill-to Customer No.", ""))))
-    buyer_pib = _strip_rs_prefix(raw_buyer_pib)   # pure digits, no RS prefix
+    raw_buyer_pib = reg.get("VAT Registration No.", gen.get("Sell-to Customer No.", inv2.get("Bill-to Customer No.", "")))
+    buyer_pib = _pib(raw_buyer_pib)   # pure digits, no RS prefix, no .0
 
     discount_total = _safe_float(tot.get("Invoice Discount Amount Excl. VAT", 0))
     total_excl_vat = _safe_float(tot.get("Total Excl. VAT (RSD)", 0))
