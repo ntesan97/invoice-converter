@@ -143,6 +143,47 @@ def _read_lines(df: pd.DataFrame) -> list:
     return lines
 
 
+# =============================================================================
+# UN/ECE RECOMMENDATION 20 UNIT CODE MAPPING
+# Maps common Business Central / local codes → valid UN/ECE 20 codes.
+# Full list: https://docs.peppol.eu/poacc/billing/3.0/codelist/UNECERec20/
+# =============================================================================
+_UNECE20 = {
+    # pieces / units
+    "KOM":  "C62", "PCS":  "C62", "PC":   "C62", "ST":   "C62",
+    "KS":   "C62", "JED":  "C62", "PIECE":"C62", "PIECES":"C62",
+    "EA":   "C62", "EACH": "C62", "NOS":  "C62", "NO":   "C62",
+    "U":    "C62",
+    # already valid UN/ECE codes — pass through
+    "C62":  "C62", "XBX":  "XBX", "XBO":  "XBO", "XCA":  "XCA",
+    "XPK":  "XPK", "XCT":  "XCT",
+    # mass
+    "KG":   "KGM", "KGM":  "KGM", "G":    "GRM", "GRM":  "GRM",
+    "T":    "TNE", "TNE":  "TNE",
+    # volume
+    "L":    "LTR", "LTR":  "LTR", "ML":   "MLT", "MLT":  "MLT",
+    "M3":   "MTQ", "MTQ":  "MTQ",
+    # length
+    "M":    "MTR", "MTR":  "MTR", "CM":   "CMT", "CMT":  "CMT",
+    "MM":   "MMT", "MMT":  "MMT",
+    # area
+    "M2":   "MTK", "MTK":  "MTK",
+    # time
+    "H":    "HUR", "HUR":  "HUR", "MIN":  "MIN", "D":    "DAY",
+    "DAY":  "DAY",
+    # packaging
+    "BOX":  "XBX", "BX":   "XBX", "CUT":  "XCT", "PAK":  "XPK",
+    "PAC":  "XPK", "PACK": "XPK", "KUT":  "XBX",
+    # pairs / sets
+    "PAR":  "PR",  "PR":   "PR",  "SET":  "SET",
+}
+
+def _map_uom(code: str) -> str:
+    """Return a valid UN/ECE 20 unit code; fall back to C62 (piece) if unknown."""
+    c = code.strip().upper()
+    return _UNECE20.get(c, "C62")   # C62 = piece, safe universal fallback
+
+
 def build_xml(xlsx_path: str) -> bytes:
     xl = pd.ExcelFile(xlsx_path)
 
@@ -282,8 +323,11 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(_sub(tc, "cac:TaxScheme"), "cbc:ID", "VAT")
 
     # ── TaxTotal ──────────────────────────────────────────────────────────────
+    # BR-CO-14: header TaxAmount (BT-110) MUST equal sum of subtotal TaxAmounts
+    # (BT-117). Always derive it from vat_groups so they are guaranteed equal.
     tt = _sub(root, "cac:TaxTotal")
-    _add(tt, "cbc:TaxAmount", _dec(total_vat)).set("currencyID", "RSD")
+    tax_total_computed = sum(g["tax"] for g in vat_groups.values())
+    _add(tt, "cbc:TaxAmount", _dec(tax_total_computed)).set("currencyID", "RSD")
     for rate, grp in sorted(vat_groups.items()):
         tst = _sub(tt, "cac:TaxSubtotal")
         _add(tst, "cbc:TaxableAmount", _dec(grp["taxable"])).set("currencyID", "RSD")
@@ -306,7 +350,7 @@ def build_xml(xlsx_path: str) -> bytes:
     # ── Invoice lines ─────────────────────────────────────────────────────────
     for idx, ln in enumerate(lines, start=1):
         qty        = _str(ln.get("Quantity", "1"))
-        uom        = _str(ln.get("Unit of Measure Code", "XBX"))
+        uom        = _map_uom(_str(ln.get("Unit of Measure Code", "C62")))
         desc       = _str(ln.get("Description", ""))
         item_no    = _str(ln.get("No.", ""))
         unit_price = _safe_float(ln.get("Unit Price Excl. VAT", 0))
