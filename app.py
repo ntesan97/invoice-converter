@@ -233,7 +233,10 @@ def build_xml(xlsx_path: str) -> bytes:
         except (TypeError, ValueError):
             pass
         if price_incl and line_amt:
-            vat_rate = round(((price_incl / line_amt) - 1) * 100 / 5) * 5
+            raw_rate = ((price_incl / line_amt) - 1) * 100
+            # Snap to nearest allowed Serbian VAT rate (10 or 20).
+            # Rounding to nearest 5 can yield 5/15/25 which SEF rejects for S.
+            vat_rate = 20.0 if raw_rate >= 15.0 else 10.0
         else:
             vat_rate = 10.0
         vg = vat_groups.setdefault(vat_rate, {"taxable": 0.0, "tax": 0.0})
@@ -386,7 +389,11 @@ def build_xml(xlsx_path: str) -> bytes:
                 price_incl = _safe_float(raw) or None
         except (TypeError, ValueError):
             pass
-        vat_rate = round(((price_incl / line_amt) - 1) * 100 / 5) * 5 if (price_incl and line_amt) else 10
+        if price_incl and line_amt:
+            raw_rate = ((price_incl / line_amt) - 1) * 100
+            vat_rate = 20.0 if raw_rate >= 15.0 else 10.0
+        else:
+            vat_rate = 10.0
 
         ctc = _sub(item, "cac:ClassifiedTaxCategory")
         _add(ctc, "cbc:ID", "S"); _add(ctc, "cbc:Percent", str(int(vat_rate)))
