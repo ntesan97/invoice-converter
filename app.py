@@ -337,15 +337,19 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(_sub(tc2, "cac:TaxScheme"), "cbc:ID", "VAT")
 
     # ── LegalMonetaryTotal ────────────────────────────────────────────────────
+    # BR-CO-15: TaxInclusiveAmount (BT-112) = TaxExclusiveAmount (BT-109)
+    #           + TaxAmount (BT-110). Always derive from computed values so
+    #           all three are guaranteed consistent regardless of sheet values.
+    tax_incl_computed = total_excl_vat + tax_total_computed
     lmt = _sub(root, "cac:LegalMonetaryTotal")
     _add(lmt, "cbc:LineExtensionAmount", _dec(line_ext_total)).set("currencyID", "RSD")
     _add(lmt, "cbc:TaxExclusiveAmount",  _dec(total_excl_vat)).set("currencyID", "RSD")
-    _add(lmt, "cbc:TaxInclusiveAmount",  _dec(total_incl_vat)).set("currencyID", "RSD")
+    _add(lmt, "cbc:TaxInclusiveAmount",  _dec(tax_incl_computed)).set("currencyID", "RSD")
     if discount_total:
         _add(lmt, "cbc:AllowanceTotalAmount", _dec(discount_total)).set("currencyID", "RSD")
     _add(lmt, "cbc:PrepaidAmount",        "0.00").set("currencyID", "RSD")
     _add(lmt, "cbc:PayableRoundingAmount","0.00").set("currencyID", "RSD")
-    _add(lmt, "cbc:PayableAmount",        _dec(total_incl_vat)).set("currencyID", "RSD")
+    _add(lmt, "cbc:PayableAmount",        _dec(tax_incl_computed)).set("currencyID", "RSD")
 
     # ── Invoice lines ─────────────────────────────────────────────────────────
     for idx, ln in enumerate(lines, start=1):
