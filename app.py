@@ -202,6 +202,22 @@ def build_xml(xlsx_path: str) -> bytes:
     if not vat_groups:
         vat_groups[10.0] = {"taxable": total_excl_vat, "tax": total_vat}
 
+    # ── BR-S-08 / BR-CO-13 fix ────────────────────────────────────────────────
+    # TaxSubtotal taxable amounts (BT-116) must equal line sums MINUS document
+    # discount for that VAT rate. Distribute discount proportionally so that:
+    #   BT-109 (TaxExclusiveAmount) = Σ BT-131 - BT-107  (BR-CO-13)
+    #   BT-116 per rate = Σ BT-131 for that rate - portion of BT-107 (BR-S-08)
+    if discount_total and line_ext_total:
+        for rate in vat_groups:
+            share = vat_groups[rate]["taxable"] / line_ext_total
+            reduction = discount_total * share
+            vat_groups[rate]["taxable"] -= reduction
+            vat_groups[rate]["tax"] = vat_groups[rate]["taxable"] * (rate / 100)
+        # Recompute header totals from the adjusted figures for full consistency
+        total_excl_vat = line_ext_total - discount_total
+        total_vat      = sum(g["tax"] for g in vat_groups.values())
+        total_incl_vat = total_excl_vat + total_vat
+
     nsmap = {None: NS[""], "cbc": NS["cbc"], "cac": NS["cac"],
              "cec": NS["cec"], "xsi": NS["xsi"], "xsd": NS["xsd"], "sbt": NS["sbt"]}
     root = etree.Element(etree.QName(NS[""], "Invoice"), nsmap=nsmap)
