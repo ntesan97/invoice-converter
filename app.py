@@ -82,7 +82,6 @@ def _pib(val) -> str:
     if not s:
         return ""
     s = _strip_rs_prefix(s)
-    # Excel often reads integer IDs as floats: "100000266.0" → "100000266"
     try:
         s = str(int(float(s)))
     except (ValueError, TypeError):
@@ -96,7 +95,6 @@ def _safe_float(val) -> float:
         s = _str(val)
         if not s:
             return 0.0
-        # Strip RS prefix if present (e.g. "RS100270693" → "100270693")
         s = _strip_rs_prefix(s)
         return float(s)
     except (TypeError, ValueError):
@@ -143,45 +141,48 @@ def _read_lines(df: pd.DataFrame) -> list:
     return lines
 
 
+def _read_additional_text_description(df: pd.DataFrame) -> str:
+    """
+    Additional Text sheet layout:
+      Row 0: title row (ignored)
+      Row 1: header row — col 0 = "Standard Code", col 1 = "Description"
+      Row 2+: data rows — the value in col 1 of the first data row is returned.
+    """
+    for i in range(2, df.shape[0]):
+        val = df.iloc[i, 1] if df.shape[1] > 1 else None
+        s = _str(val)
+        if s:
+            return s
+    return ""
+
+
 # =============================================================================
 # UN/ECE RECOMMENDATION 20 UNIT CODE MAPPING
-# Maps common Business Central / local codes → valid UN/ECE 20 codes.
-# Full list: https://docs.peppol.eu/poacc/billing/3.0/codelist/UNECERec20/
 # =============================================================================
 _UNECE20 = {
-    # pieces / units
     "KOM":  "C62", "PCS":  "C62", "PC":   "C62", "ST":   "C62",
     "KS":   "C62", "JED":  "C62", "PIECE":"C62", "PIECES":"C62",
     "EA":   "C62", "EACH": "C62", "NOS":  "C62", "NO":   "C62",
     "U":    "C62",
-    # already valid UN/ECE codes — pass through
     "C62":  "C62", "XBX":  "XBX", "XBO":  "XBO", "XCA":  "XCA",
     "XPK":  "XPK", "XCT":  "XCT",
-    # mass
     "KG":   "KGM", "KGM":  "KGM", "G":    "GRM", "GRM":  "GRM",
     "T":    "TNE", "TNE":  "TNE",
-    # volume
     "L":    "LTR", "LTR":  "LTR", "ML":   "MLT", "MLT":  "MLT",
     "M3":   "MTQ", "MTQ":  "MTQ",
-    # length
     "M":    "MTR", "MTR":  "MTR", "CM":   "CMT", "CMT":  "CMT",
     "MM":   "MMT", "MMT":  "MMT",
-    # area
     "M2":   "MTK", "MTK":  "MTK",
-    # time
     "H":    "HUR", "HUR":  "HUR", "MIN":  "MIN", "D":    "DAY",
     "DAY":  "DAY",
-    # packaging
     "BOX":  "XBX", "BX":   "XBX", "CUT":  "XCT", "PAK":  "XPK",
     "PAC":  "XPK", "PACK": "XPK", "KUT":  "XBX",
-    # pairs / sets
     "PAR":  "PR",  "PR":   "PR",  "SET":  "SET",
 }
 
 def _map_uom(code: str) -> str:
-    """Return a valid UN/ECE 20 unit code; fall back to C62 (piece) if unknown."""
     c = code.strip().upper()
-    return _UNECE20.get(c, "C62")   # C62 = piece, safe universal fallback
+    return _UNECE20.get(c, "C62")
 
 
 def build_xml(xlsx_path: str) -> bytes:
@@ -192,11 +193,14 @@ def build_xml(xlsx_path: str) -> bytes:
     tot_df   = pd.read_excel(xl, sheet_name="Edit - Posted Sales Invoice - 1", header=None)
     inv2_df  = pd.read_excel(xl, sheet_name="Invoicing",                       header=None)
     reg_df   = pd.read_excel(xl, sheet_name="Registration Numbers",            header=None)
+    ship_df  = pd.read_excel(xl, sheet_name="Shipping",                        header=None)
+    atxt_df  = pd.read_excel(xl, sheet_name="Additional Text",                 header=None)
 
     gen   = _read_kv(gen_df)
     tot   = _read_kv(tot_df)
     inv2  = _read_kv(inv2_df)
     reg   = _read_kv(reg_df)
+    ship  = _read_kv(ship_df)
     lines = _read_lines(inv_df)
 
     invoice_no   = _str(gen.get("No.", ""))
@@ -210,10 +214,18 @@ def build_xml(xlsx_path: str) -> bytes:
     buyer_city   = _str(gen.get("Sell-to City",           inv2.get("Bill-to City", "")))
     buyer_zip    = _str(gen.get("Sell-to Post Code",      inv2.get("Bill-to Post Code", "")))
 
-    # ── Buyer PIB: read from Registration Numbers sheet ──────────────────────
-    # "VAT Registration No." may be stored as "100270693" or "RS100270693"
     raw_buyer_pib = reg.get("VAT Registration No.", gen.get("Sell-to Customer No.", inv2.get("Bill-to Customer No.", "")))
-    buyer_pib = _pib(raw_buyer_pib)   # pure digits, no RS prefix, no .0
+    buyer_pib = _pib(raw_buyer_pib)
+
+    # ── New fields ────────────────────────────────────────────────────────────
+    # 1. OrderReference  ← General / "External Document No."
+    order_ref = ext_doc_no  # same value, explicit alias for clarity
+
+    # 2. AdditionalDocumentReference (Šifra objekta) ← Shipping / "Ship-to Name"
+    ship_to_name = _str(ship.get("Ship-to Name", ""))
+
+    # 3. DespatchDocumentReference ← Additional Text / Description column, first data row
+    despatch_ref = _read_additional_text_description(atxt_df)
 
     discount_total = _safe_float(tot.get("Invoice Discount Amount Excl. VAT", 0))
     total_excl_vat = _safe_float(tot.get("Total Excl. VAT (RSD)", 0))
@@ -234,8 +246,6 @@ def build_xml(xlsx_path: str) -> bytes:
             pass
         if price_incl and line_amt:
             raw_rate = ((price_incl / line_amt) - 1) * 100
-            # Snap to nearest allowed Serbian VAT rate (10 or 20).
-            # Rounding to nearest 5 can yield 5/15/25 which SEF rejects for S.
             vat_rate = 20.0 if raw_rate >= 15.0 else 10.0
         else:
             vat_rate = 10.0
@@ -246,18 +256,12 @@ def build_xml(xlsx_path: str) -> bytes:
     if not vat_groups:
         vat_groups[10.0] = {"taxable": total_excl_vat, "tax": total_vat}
 
-    # ── BR-S-08 / BR-CO-13 fix ────────────────────────────────────────────────
-    # TaxSubtotal taxable amounts (BT-116) must equal line sums MINUS document
-    # discount for that VAT rate. Distribute discount proportionally so that:
-    #   BT-109 (TaxExclusiveAmount) = Σ BT-131 - BT-107  (BR-CO-13)
-    #   BT-116 per rate = Σ BT-131 for that rate - portion of BT-107 (BR-S-08)
     if discount_total and line_ext_total:
         for rate in vat_groups:
             share = vat_groups[rate]["taxable"] / line_ext_total
             reduction = discount_total * share
             vat_groups[rate]["taxable"] -= reduction
             vat_groups[rate]["tax"] = vat_groups[rate]["taxable"] * (rate / 100)
-        # Recompute header totals from the adjusted figures for full consistency
         total_excl_vat = line_ext_total - discount_total
         total_vat      = sum(g["tax"] for g in vat_groups.values())
         total_incl_vat = total_excl_vat + total_vat
@@ -275,8 +279,23 @@ def build_xml(xlsx_path: str) -> bytes:
     if ext_doc_no:
         _add(root, "cbc:Note", ext_doc_no)
     _add(root, "cbc:DocumentCurrencyCode", "RSD")
+
     ip = _sub(root, "cac:InvoicePeriod")
     _add(ip, "cbc:DescriptionCode", "35")
+
+    # OrderReference ← External Document No. (General sheet)
+    if order_ref:
+        _add(_sub(root, "cac:OrderReference"), "cbc:ID", order_ref)
+
+    # DespatchDocumentReference ← Additional Text / Description column
+    if despatch_ref:
+        _add(_sub(root, "cac:DespatchDocumentReference"), "cbc:ID", despatch_ref)
+
+    # AdditionalDocumentReference ← Shipping / Ship-to Name
+    if ship_to_name:
+        adr = _sub(root, "cac:AdditionalDocumentReference")
+        _add(adr, "cbc:ID", ship_to_name)
+        _add(adr, "cbc:DocumentTypeCode", "130")
 
     # ── Supplier ──────────────────────────────────────────────────────────────
     sup_party = _sub(_sub(root, "cac:AccountingSupplierParty"), "cac:Party")
@@ -288,7 +307,7 @@ def build_xml(xlsx_path: str) -> bytes:
     _add(pa, "cbc:PostalZone", SELLER["post_code"])
     _add(_sub(pa, "cac:Country"), "cbc:IdentificationCode", SELLER["country"])
     pts = _sub(sup_party, "cac:PartyTaxScheme")
-    _add(pts, "cbc:CompanyID", f"RS{SELLER['pib']}")   # always RS + 9 digits
+    _add(pts, "cbc:CompanyID", f"RS{SELLER['pib']}")
     _add(_sub(pts, "cac:TaxScheme"), "cbc:ID", "VAT")
     ple = _sub(sup_party, "cac:PartyLegalEntity")
     _add(ple, "cbc:RegistrationName", SELLER["name"])
@@ -306,7 +325,7 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(cpa, "cbc:PostalZone", buyer_zip)
     _add(_sub(cpa, "cac:Country"), "cbc:IdentificationCode", "RS")
     cpts = _sub(cust_party, "cac:PartyTaxScheme")
-    _add(cpts, "cbc:CompanyID", f"RS{buyer_pib}")       # always RS + 9 digits
+    _add(cpts, "cbc:CompanyID", f"RS{buyer_pib}")
     _add(_sub(cpts, "cac:TaxScheme"), "cbc:ID", "VAT")
     _add(_sub(cust_party, "cac:PartyLegalEntity"), "cbc:RegistrationName", buyer_name)
 
@@ -326,8 +345,6 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(_sub(tc, "cac:TaxScheme"), "cbc:ID", "VAT")
 
     # ── TaxTotal ──────────────────────────────────────────────────────────────
-    # BR-CO-14: header TaxAmount (BT-110) MUST equal sum of subtotal TaxAmounts
-    # (BT-117). Always derive it from vat_groups so they are guaranteed equal.
     tt = _sub(root, "cac:TaxTotal")
     tax_total_computed = sum(g["tax"] for g in vat_groups.values())
     _add(tt, "cbc:TaxAmount", _dec(tax_total_computed)).set("currencyID", "RSD")
@@ -340,9 +357,6 @@ def build_xml(xlsx_path: str) -> bytes:
         _add(_sub(tc2, "cac:TaxScheme"), "cbc:ID", "VAT")
 
     # ── LegalMonetaryTotal ────────────────────────────────────────────────────
-    # BR-CO-15: TaxInclusiveAmount (BT-112) = TaxExclusiveAmount (BT-109)
-    #           + TaxAmount (BT-110). Always derive from computed values so
-    #           all three are guaranteed consistent regardless of sheet values.
     tax_incl_computed = total_excl_vat + tax_total_computed
     lmt = _sub(root, "cac:LegalMonetaryTotal")
     _add(lmt, "cbc:LineExtensionAmount", _dec(line_ext_total)).set("currencyID", "RSD")
@@ -518,7 +532,7 @@ if uploaded:
 
 st.markdown("""
 <div class="info-row">
-    <span>Reads: General · Invoice Lines · Totals · Invoicing · Registration Numbers</span>
+    <span>Reads: General · Invoice Lines · Totals · Invoicing · Registration Numbers · Shipping · Additional Text</span>
     <span>Schema: EN 16931 / mfin.gov.rs 2022</span>
 </div>
 """, unsafe_allow_html=True)
