@@ -2,6 +2,7 @@
 import streamlit as st
 import tempfile
 import os
+import re
 from pathlib import Path
 from datetime import datetime, date
 import pandas as pd
@@ -152,7 +153,7 @@ def _read_additional_text_description(df: pd.DataFrame) -> str:
         val = df.iloc[i, 1] if df.shape[1] > 1 else None
         s = _str(val)
         if s:
-            return s
+            return re.sub(r"^Otpremnica\s*:\s*", "", s, flags=re.IGNORECASE)
     return ""
 
 
